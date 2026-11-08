@@ -52,6 +52,7 @@ jobs:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $password = $env:RDP_PASSWORD
+          if ($null -ne $password) { $password = $password.Trim() }   # إزالة أي سطر/مسافة زائدة
           if ([string]::IsNullOrWhiteSpace($password)) {
               Write-Error "Secret RDP_PASSWORD is not set. Add it in Settings > Secrets and variables > Actions."
               exit 1

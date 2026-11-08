@@ -124,6 +124,10 @@ jobs:
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
+              Write-Error "Secret TAILSCALE_AUTHKEY is missing. Add it in Settings > Secrets and variables > Actions. Without it 'tailscale up' waits for manual browser login and hangs."
+              exit 1
+          }
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname=gh-runner-$env:GITHUB_RUN_ID
 
           $tsIP = $null

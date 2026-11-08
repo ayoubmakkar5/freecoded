@@ -48,9 +48,15 @@ jobs:
       # ─────────────────────────────────────────────────────────────
       - name: Create RDP User with Fixed Password
         shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          $password   = "Rdp2026@Qz8Lm4Kt"
-          Write-Host "::add-mask::$password"   # يمنع ظهور الكلمة في السجلات العامة
+          $password = $env:RDP_PASSWORD
+          if ([string]::IsNullOrWhiteSpace($password)) {
+              Write-Error "Secret RDP_PASSWORD is not set. Add it in Settings > Secrets and variables > Actions."
+              exit 1
+          }
+          Write-Host "::add-mask::$password"   # إضافة تأمين مزدوج (GitHub يخفي الأسرار تلقائياً)
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {

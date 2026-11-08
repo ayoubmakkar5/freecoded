@@ -50,6 +50,7 @@ jobs:
         shell: pwsh
         run: |
           $password   = "Rdp2026@Qz8Lm4Kt"
+          Write-Host "::add-mask::$password"   # يمنع ظهور الكلمة في السجلات العامة
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
@@ -171,7 +172,7 @@ jobs:
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address : $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_CREDS"
+          Write-Host "Password: *** (masked)"
           Write-Host "==================`n"
 
           "### RDP Ready" | Out-File $env:GITHUB_STEP_SUMMARY -Append
@@ -179,7 +180,7 @@ jobs:
           "|---|---|" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           "| Address | ``$env:TAILSCALE_IP`` |" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           "| Username | ``RDP`` |" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-          "| Password | ``Rdp2026@Qz8Lm4Kt`` |" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "| Password | (مخفي — راجع مالك المستودع) |" | Out-File $env:GITHUB_STEP_SUMMARY -Append
 
           $rdpProfile   = "C:\Users\RDP"
           $startupPath  = "$rdpProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"

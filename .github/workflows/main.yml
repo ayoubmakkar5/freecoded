@@ -1,133 +1,238 @@
-name: win 11 + tailscale + Download.bat script 
+name: win 11 + tailscale + Download.bat
 
 on:
   workflow_dispatch:
 
 jobs:
   secure-rdp:
-    runs-on: windows-2022
+    # windows-2025 = Windows Server 2025 (kernel 26100 = نفس نواة Windows 11 24H2).
+    # GitHub لا يوفّر صورة Windows 11 x64، وهذا أقرب وأسرع خيار متاح.
+    runs-on: windows-2025
     timeout-minutes: 350
 
     steps:
+      # ─────────────────────────────────────────────────────────────
+      # 1) إعدادات RDP الأساسية + الإصلاح الجوهري (SecurityLayer=2)
+      # ─────────────────────────────────────────────────────────────
       - name: Configure Core RDP Settings
+        shell: pwsh
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          $ts  = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+          $rdp = "$ts\WinStations\RDP-Tcp"
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-         
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+          # تفعيل RDP
+          Set-ItemProperty -Path $ts -Name 'fDenyTSConnections' -Value 0 -Force
 
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          # SecurityLayer = 2 (TLS). القيمة 0 هي التي كانت تُعطّل الاتصال.
+          Set-ItemProperty -Path $rdp -Name 'SecurityLayer'       -Value 2 -Force
+          Set-ItemProperty -Path $rdp -Name 'MinEncryptionLevel'  -Value 2 -Force
+          Set-ItemProperty -Path $rdp -Name 'UserAuthentication'  -Value 0 -Force
+
+          # الفايروول: TCP + UDP (UDP يقلل التأخير في نقل RDP)
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"     2>$null | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale"      dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          netsh advfirewall firewall delete rule name="RDP-Tailscale-UDP" 2>$null | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale-UDP" dir=in action=allow protocol=UDP localport=3389 | Out-Null
+
           Restart-Service -Name TermService -Force
+          Start-Sleep -Seconds 3
 
+          # تحقّق أن الإصلاح ثابت فعلاً (يمنع فشل الاتصال الصامت)
+          $layer  = (Get-ItemProperty -Path $rdp -Name 'SecurityLayer').SecurityLayer
+          $minEnc = (Get-ItemProperty -Path $rdp -Name 'MinEncryptionLevel').MinEncryptionLevel
+          Write-Host "SecurityLayer=$layer  MinEncryptionLevel=$minEnc"
+          if ($layer -ne 2) { Write-Error "SecurityLayer is $layer, expected 2"; exit 1 }
+
+      # ─────────────────────────────────────────────────────────────
+      # 2) إنشاء مستخدم RDP
+      # ─────────────────────────────────────────────────────────────
       - name: Create RDP User with Fixed Password
+        shell: pwsh
         run: |
-          $password = "MR.English2008"
+          $password   = "Rdp2026@Qz8Lm4Kt"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+              New-LocalUser -Name "RDP" -Password $securePass `
+                            -AccountNeverExpires -PasswordNeverExpires
           }
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-         
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-         
-          if (-not (Get-LocalUser -Name "RDP")) {
+
+          Add-LocalGroupMember -Group "Administrators"        -Member "RDP" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users"  -Member "RDP" -ErrorAction SilentlyContinue
+
+          "RDP_CREDS=User: RDP | Password: $password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
               Write-Error "User creation failed"
               exit 1
           }
+          Write-Host "User RDP ready"
 
-      - name: Install Tailscale
+      # ─────────────────────────────────────────────────────────────
+      # 3) تحسين أداء الجلسة على الخادم (يُورَّث لكل ملف تعريف جديد)
+      # ─────────────────────────────────────────────────────────────
+      - name: Tune RDP for Performance
+        shell: pwsh
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          # خطة الطاقة: أداء عالٍ
+          powercfg /setactive SCHEME_MIN 2>$null
+
+          # تطبيق "أفضل أداء" على ملف Default ليَرِثه مستخدم RDP عند أول دخول
+          $hive = 'C:\Users\Default\NTUSER.DAT'
+          if (Test-Path $hive) {
+            reg load 'HKLM\DefUser' $hive | Out-Null
+            try {
+              reg add 'HKLM\DefUser\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' /v VisualFXSetting  /t REG_DWORD /d 2 /f | Out-Null
+              reg add 'HKLM\DefUser\Control Panel\Desktop'                /v MenuShowDelay     /t REG_SZ    /d 0 /f | Out-Null
+              reg add 'HKLM\DefUser\Control Panel\Desktop'                /v DragFullWindows   /t REG_SZ    /d 0 /f | Out-Null
+              reg add 'HKLM\DefUser\Control Panel\Desktop'                /v FontSmoothing     /t REG_SZ    /d 0 /f | Out-Null
+              reg add 'HKLM\DefUser\Control Panel\Desktop\WindowMetrics'  /v MinAnimate        /t REG_SZ    /d 0 /f | Out-Null
+              reg add 'HKLM\DefUser\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' /v TaskbarAnimations /t REG_DWORD /d 0 /f | Out-Null
+              Write-Host "Default profile tuned"
+            } finally {
+              [gc]::Collect(); Start-Sleep -Seconds 2
+              reg unload 'HKLM\DefUser' | Out-Null
+            }
+          }
+
+      # ─────────────────────────────────────────────────────────────
+      # 4) تثبيت Tailscale
+      # ─────────────────────────────────────────────────────────────
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $tsUrl         = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-         
+
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
+      # ─────────────────────────────────────────────────────────────
+      # 5) الاتصال بـ Tailscale
+      # ─────────────────────────────────────────────────────────────
       - name: Establish Tailscale Connection
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-         
-          # Wait for Tailscale to assign an IP
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname=gh-runner-$env:GITHUB_RUN_ID
+
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+              if (-not $tsIP) { Start-Sleep -Seconds 5; $retries++ }
           }
-         
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-     
+
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
+
+          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Tailscale IP: $tsIP"
+
+      # ─────────────────────────────────────────────────────────────
+      # 6) التحقق من أن RDP يعمل فعلاً (TCP + مصافحة TLS)
+      # ─────────────────────────────────────────────────────────────
       - name: Verify RDP Accessibility
+        shell: pwsh
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-         
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
+
+          $tcp = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $tcp.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
+          Write-Host "TCP 3389 OK"
 
+          # إثبات أن TLS يشتغل (هذا بالضبط ما كان معطلاً مع SecurityLayer=0)
+          try {
+              $client = [System.Net.Sockets.TcpClient]::new()
+              $client.Connect($env:TAILSCALE_IP, 3389)
+              $stream = $client.GetStream()
+              $ssl    = [System.Net.Security.SslStream]::new($stream, $false, { param($s,$c,$ch,$e) $true })
+              $ssl.AuthenticateAsClient($env:TAILSCALE_IP)
+              Write-Host "TLS OK: $($ssl.SslProtocol) / $($ssl.CipherAlgorithm)"
+              $ssl.Close(); $client.Close()
+          }
+          catch {
+              Write-Error "TLS handshake failed: $($_.Exception.Message)"
+              exit 1
+          }
+
+      # ─────────────────────────────────────────────────────────────
+      # 7) Download.bat + الحفاظ على الاتصال (مع إصلاح ذاتي لـ Tailscale)
+      # ─────────────────────────────────────────────────────────────
       - name: Maintain Connection + Watch RDP User
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Address : $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
 
-          $rdpProfile = "C:\Users\RDP"
-          $startupPath = "$rdpProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
-          $downloadUrl = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
+          "### RDP Ready" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "| Field | Value |" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "|---|---|" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "| Address | ``$env:TAILSCALE_IP`` |" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "| Username | ``RDP`` |" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "| Password | ``Rdp2026@Qz8Lm4Kt`` |" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+          $rdpProfile   = "C:\Users\RDP"
+          $startupPath  = "$rdpProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          $downloadUrl  = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
           $downloadPath = "$startupPath\Downloads.bat"
 
-          while ($true) {
-              if (Test-Path $rdpProfile) {
-                  try {
-                      if (-not (Test-Path $startupPath)) {
-                          New-Item -ItemType Directory -Path $startupPath -Force | Out-Null
-                      }
+          # انتظار إنشاء ملف تعريف المستخدم
+          while (-not (Test-Path $rdpProfile)) {
+              Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
+              Start-Sleep -Seconds 30
+          }
 
-                      Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
-                      Write-Host "? Downloads.bat copied to $downloadPath"
+          New-Item -ItemType Directory -Path $startupPath -Force | Out-Null
 
-                      # Run the batch file for the first time
-                      cmd /c $downloadPath
-                      Write-Host "? Downloads.bat executed successfully"
-                      break
-                  }
-                  catch {
-                      Write-Host "? Error copying or executing Downloads.bat: $($_.Exception.Message)"
-                      break
-                  }
-              }
-              else {
-                  Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
-                  Start-Sleep -Seconds 30
+          # تنزيل مع 10 محاولات
+          $ok = $false
+          for ($i = 1; $i -le 10; $i++) {
+              try {
+                  Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -TimeoutSec 60
+                  $ok = $true
+                  break
+              } catch {
+                  Write-Host "[$(Get-Date)] Download attempt $i failed: $($_.Exception.Message)"
+                  Start-Sleep -Seconds 15
               }
           }
 
-          # Keep runner alive
+          if ($ok) {
+              Write-Host "Downloads.bat saved to $downloadPath"
+              try {
+                  cmd /c $downloadPath
+                  Write-Host "Downloads.bat executed successfully"
+              } catch {
+                  Write-Host "Execution error: $($_.Exception.Message)"
+              }
+          } else {
+              Write-Host "Could not download Downloads.bat after 10 attempts"
+          }
+
+          # حلقة البقاء + إصلاح ذاتي لـ Tailscale
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              try {
+                  $st = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json 2>$null | ConvertFrom-Json
+                  if ($st.BackendState -ne 'Running') {
+                      Write-Host "[$(Get-Date)] Tailscale state=$($st.BackendState) - reconnecting..."
+                      Restart-Service Tailscale -Force -ErrorAction SilentlyContinue
+                      Start-Sleep -Seconds 5
+                      & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTHKEY --hostname=gh-runner-$env:GITHUB_RUN_ID
+                  }
+              } catch {
+                  Write-Host "[$(Get-Date)] Tailscale check failed: $($_.Exception.Message)"
+              }
+
+              Write-Host "[$(Get-Date)] RDP Active - IP $env:TAILSCALE_IP - Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }

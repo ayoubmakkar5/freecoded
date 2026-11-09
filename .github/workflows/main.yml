@@ -104,6 +104,23 @@ jobs:
           }
 
       # ─────────────────────────────────────────────────────────────
+      # 3.5) تثبيت لغة الواجهة العربية (غير حرج - إن فشل يبقى الإنجليزية)
+      # ─────────────────────────────────────────────────────────────
+      - name: Install Arabic UI Language
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          try {
+            Import-Module LanguagePackManagement -ErrorAction Stop
+            Install-Language -Language ar-SA -ErrorAction Stop
+            Set-WinUILanguageOverride -Language ar-SA
+            Set-WinUserLanguageList -LanguageList ar-SA -Force
+            Write-Host "Arabic UI language installed"
+          } catch {
+            Write-Host "Arabic language install skipped/failed: $($_.Exception.Message)"
+          }
+
+      # ─────────────────────────────────────────────────────────────
       # 4) تثبيت Tailscale
       # ─────────────────────────────────────────────────────────────
       - name: Install Tailscale

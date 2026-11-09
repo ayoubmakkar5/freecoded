@@ -173,7 +173,46 @@ jobs:
           }
 
       # ─────────────────────────────────────────────────────────────
-      # 7) Download.bat + الحفاظ على الاتصال (مع إصلاح ذاتي لـ Tailscale)
+      # 7) تثبيت وتشغيل وسيط gost (HTTP 8080 + SOCKS5 1080)
+      # ─────────────────────────────────────────────────────────────
+      - name: Install and Start gost Proxy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "C:\Windows\Temp\gost"
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          $exe = "$dir\gost.exe"
+          if (-not (Test-Path $exe)) {
+            $zip = "$dir\gost.zip"
+            Invoke-WebRequest -Uri "https://github.com/ginuerzh/gost/releases/download/v2.12.0/gost_2.12.0_windows_amd64.zip" -OutFile $zip -UseBasicParsing
+            Expand-Archive -Path $zip -DestinationPath $dir -Force
+            $found = Get-ChildItem $dir -Recurse -Filter "gost*.exe" | Select-Object -First 1
+            if (-not $found) { throw "gost.exe not found in archive" }
+            Copy-Item $found.FullName $exe -Force
+            Remove-Item $zip -Force
+          }
+
+          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          if (-not $ip) { throw "No Tailscale IP" }
+
+          schtasks /delete /tn gostproxy /f 2>$null | Out-Null
+          $cmd = "`"$exe`" -L http://${ip}:8080 -L socks5://${ip}:1080"
+          schtasks /create /tn gostproxy /tr $cmd /sc onstart /ru SYSTEM /rl HIGHEST /f | Out-Null
+          schtasks /run /tn gostproxy | Out-Null
+          Start-Sleep -Seconds 3
+
+          netsh advfirewall firewall delete rule name="gost8080" 2>$null | Out-Null
+          netsh advfirewall firewall add rule name="gost8080" dir=in action=allow protocol=TCP localport=8080 | Out-Null
+          netsh advfirewall firewall delete rule name="gost1080" 2>$null | Out-Null
+          netsh advfirewall firewall add rule name="gost1080" dir=in action=allow protocol=TCP localport=1080 | Out-Null
+
+          $ok = Test-NetConnection -ComputerName $ip -Port 8080 -InformationLevel Quiet
+          Write-Host "gost HTTP ${ip}:8080 -> $ok"
+          if (-not $ok) { throw "gost is not listening on 8080" }
+          "GOST_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ─────────────────────────────────────────────────────────────
+      # 8) Download.bat + الحفاظ على الاتصال (مع إصلاح ذاتي لـ Tailscale)
       # ─────────────────────────────────────────────────────────────
       - name: Maintain Connection + Watch RDP User
         shell: pwsh
@@ -243,6 +282,23 @@ jobs:
                   }
               } catch {
                   Write-Host "[$(Get-Date)] Tailscale check failed: $($_.Exception.Message)"
+              }
+
+              # تأكد أن وسيط gost ما زال يعمل (أعد إنشاءه إن تغيّر عنوان Tailscale)
+              try {
+                  $gostExe  = "C:\Windows\Temp\gost\gost.exe"
+                  $gostProc = Get-Process -Name gost -ErrorAction SilentlyContinue
+                  if (-not $gostProc -and (Test-Path $gostExe)) {
+                      $ipNow = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+                      if ($ipNow) {
+                          schtasks /delete /tn gostproxy /f 2>$null | Out-Null
+                          schtasks /create /tn gostproxy /tr "`"$gostExe`" -L http://${ipNow}:8080 -L socks5://${ipNow}:1080" /sc onstart /ru SYSTEM /rl HIGHEST /f | Out-Null
+                          schtasks /run /tn gostproxy | Out-Null
+                          Write-Host "[$(Get-Date)] gost restarted on ${ipNow}"
+                      }
+                  }
+              } catch {
+                  Write-Host "[$(Get-Date)] gost check failed: $($_.Exception.Message)"
               }
 
               Write-Host "[$(Get-Date)] RDP Active - IP $env:TAILSCALE_IP - Ctrl+C in workflow to terminate"
